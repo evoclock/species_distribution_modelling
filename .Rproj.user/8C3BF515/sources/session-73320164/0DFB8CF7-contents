@@ -1,0 +1,146 @@
+# Bioclim and Mahalanobis methods
+
+# Recreate the data used prior
+library(dismo)
+library(maptools)
+data(wrld_simpl)
+
+predictors = stack(list.files(file.path(system.file(package="dismo"), 'ex'), pattern='grd$', full.names=TRUE ))
+file = file.path(system.file(package="dismo"), "ex/bradypus.csv")
+
+# Presence data
+bradypus = read.table(file,  header=TRUE,  sep=',')
+bradypus = bradypus[,-1]
+presvals = extract(predictors, bradypus)
+
+# Absence data
+set.seed(0)
+backgr = randomPoints(predictors, 500)
+absvals = extract(predictors, backgr)
+pb = c(rep(1, nrow(presvals)), rep(0, nrow(absvals)))
+
+sdmdata = data.frame(cbind(pb, rbind(presvals, absvals)))
+sdmdata[,'biome'] = as.factor(sdmdata[,'biome'])
+
+# Drop categorical variables if needed for a given model that cannot handle 
+# these
+
+pred_nf = dropLayer(predictors, 'biome')
+
+# Split the presence data into training and test sets
+set.seed(0)
+group = kfold(bradypus, 5)
+# Opting to make all groupds but group 1 the training set
+pres_train = bradypus[group != 1, ]
+pres_test = bradypus[group == 1, ]
+
+# if desired for expediency, restrict predictions to a specific area
+
+ext = extent(-90, -32, -33, 23)
+
+# setting the background data for training and testing sets. 
+# The first layer in the raster stack is used as a mask. This ensures that
+# 1000 random points only occur within the spatial extent of the rasters, and 
+# within  cells that do not report NAs, furthermore, there also should be a 
+# single absence point per cell.
+# The background points are further restricted to be within 12.5% of the 
+# specified ext (extf = 1.25)
+
+set.seed(10)
+backg = randomPoints(pred_nf, n=1000, ext=ext, extf = 1.25)
+colnames(backg) = c('lon', 'lat')
+
+# kfold the background into 5 partitions
+group = kfold(backg, 5)
+
+# as with the presence data, all partitions but group 1 are the training set
+backg_train = backg[group != 1, ]
+backg_test = backg[group == 1, ]
+
+# Plot the first raster and draw the extent area with absence and presence 
+# points from respective test and training sets.
+# Background training set = yellow -
+# Background test set = black -
+# Presence training set = green +
+# Presence test set = blue +
+
+r = raster(pred_nf, 1)
+plot(!is.na(r), col=c('white', 'light grey'), legend=FALSE)
+plot(ext, add=TRUE, col='red', lwd=2)
+points(backg_train, pch='0', cex=0.5, col='yellow')
+points(backg_test, pch='0',  cex=0.5, col='black')
+points(pres_train, pch= '+', col='purple')
+points(pres_test, pch='+', col='blue')
+
+# Presence-only methods
+# Bioclim and Mahalanobis
+# Caveat: these do not perform well when considering climate change
+
+# Use the pred_nf as we need the dataset without categorical variables
+bc = bioclim(pred_nf, pres_train)
+plot(bc, a=1, b=2, p=0.85)
+
+e = evaluate(pres_test, backg_test, bc, pred_nf)
+e
+## class          : ModelEvaluation
+## n presences    : 23
+## n absences     : 200
+## AUC            : 0.6890217
+## cor            : 0.1765706
+## max TPR+TNR at : 0.08592151
+
+# find a threshold
+tr = threshold(e, 'spec_sens')
+tr
+##  0.08592151
+
+# Use the rasterstack with predictor variable to make a prediction to
+# a raster layer for the area we set up with ext
+# Use the predict function like this so that it ensures compatibility with
+# models defined in all packages
+pb = predict(pred_nf, bc, ext = ext, progress='')
+pb
+
+## class      : RasterLayer
+## dimensions : 112, 116, 12992  (nrow, ncol, ncell)
+## resolution : 0.5, 0.5  (x, y)
+## extent     : -90, -32, -33, 23  (xmin, xmax, ymin, ymax)
+## crs        : +proj=longlat +datum=WGS84 +no_defs
+## source     : memory
+## names      : layer
+## values     : 0, 0.7096774  (min, max)
+
+par(mfrow=c(1,2))
+plot(pb, main='Bioclim, raw values')
+plot(wrld_simpl, add=TRUE, border='dark grey')
+plot(pb > tr, main='presence/absence')
+plot(wrld_simpl, add=TRUE, border='dark grey')
+points(pres_train, pch='+')
+
+# Now Mahalanobis distance prediction
+
+mm = mahal(pred_nf, pres_train)
+e = evaluate(pres_test, backg_test, mm, pred_nf)
+e
+## class          : ModelEvaluation
+## n presences    : 23
+## n absences     : 200
+## AUC            : 0.7686957
+## cor            : 0.1506777
+## max TPR+TNR at : 0.1116504
+
+# It only takes into account correlations of the variables in the data set
+# and it is independent of the scale of the measurements
+pm = predict(pred_nf, mm, ext=ext, progress='')
+
+par(mfrow=c(1,2))
+pm[pm < -10] <- -10
+plot(pm, main='Mahalanobis distance')
+plot(wrld_simpl, add=TRUE, border='dark grey')
+
+# as before find the threshold in the evaluation
+tr = threshold(e, 'spec_sens')
+
+plot(pm > tr, main='presence/absence')
+plot(wrld_simpl, add=TRUE, border='dark grey')
+points(pres_train, pch='+')
